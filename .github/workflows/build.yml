@@ -1,0 +1,71 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build MeP processor module (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout module sources
+        uses: actions/checkout@v4
+        with:
+          path: mep-src
+
+      - name: Checkout IDA SDK (public, 9.4)
+        uses: actions/checkout@v4
+        with:
+          repository: HexRaysSA/ida-sdk
+          ref: v9.4.0-sdk.1
+          path: ida-sdk
+
+      - name: Place module into SDK tree
+        shell: pwsh
+        run: |
+          $dest = "ida-sdk/src/module/mep"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # Copy everything except the VCS/CI metadata into the SDK module dir.
+          Get-ChildItem mep-src -Force |
+            Where-Object { $_.Name -notin ".git", ".github" } |
+            ForEach-Object { Copy-Item $_.FullName -Destination $dest -Recurse -Force }
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build (Release64 / x64)
+        shell: pwsh
+        working-directory: ida-sdk/src/module/mep
+        run: msbuild mep.sln /m /p:Configuration=Release64 /p:Platform=x64
+
+      - name: Collect mep.dll
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem ida-sdk/src/module/mep -Recurse -Filter mep.dll |
+                 Select-Object -First 1
+          if (-not $dll) { throw "mep.dll not found after build" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $dll.FullName dist/mep.dll -Force
+          Write-Host "Built: $($dll.FullName)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mep-processor-module
+          path: dist/mep.dll
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, "refs/tags/")
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/mep.dll
+          generate_release_notes: true
